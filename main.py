@@ -1,6 +1,7 @@
 import requests
 import datetime
-from telegram import Update
+from io import BytesIO
+from telegram import Update, InputFile
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 from config import TELEGRAM_BOT_TOKEN, RAPIDAPI_KEY
 
@@ -10,8 +11,20 @@ API_URL = "https://tiktok-video-no-watermark2.p.rapidapi.com/"
 
 def start(update: Update, context: CallbackContext):
     update.message.reply_text(
-        "Halo! Kirimkan link video TikTok dan saya akan mengambil data video tanpa watermark beserta informasi sisa penggunaan API."
+        "Halo! Kirimkan link video TikTok dan saya akan mengirim video tanpa watermark, sound, dan nama user-nya."
     )
+
+def download_file(url: str) -> bytes:
+    """Mengunduh file (video atau audio) dari URL yang diberikan."""
+    try:
+        response = requests.get(url, stream=True, timeout=20)
+        response.raise_for_status()
+        content = response.content
+        print(f"Downloaded file from {url}, size: {len(content)} bytes")
+        return content
+    except Exception as e:
+        print("Error saat mendownload file:", e)
+        return None
 
 def get_video_info_rapidapi(tiktok_url: str) -> (dict, dict):
     """
@@ -21,17 +34,19 @@ def get_video_info_rapidapi(tiktok_url: str) -> (dict, dict):
     Returns:
       tuple: (data JSON, usage_info dictionary)
     """
-    querystring = {"url": tiktok_url, "hd": "1"}  # 'hd' opsional untuk mendapatkan video HD
+    querystring = {"url": tiktok_url, "hd": "1"}
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
         "x-rapidapi-host": RAPIDAPI_HOST
     }
     try:
         response = requests.get(API_URL, headers=headers, params=querystring, timeout=10)
-        response.raise_for_status()  # Pastikan status code 200
+        response.raise_for_status()
         data = response.json()
         
-        # Ekstrak informasi rate limit dari header respons
+        # Log response API ke terminal jika berhasil
+        print("Response API:", data)
+        
         remaining = response.headers.get("x-ratelimit-remaining")
         limit = response.headers.get("x-ratelimit-limit")
         reset = response.headers.get("x-ratelimit-reset")
@@ -68,11 +83,35 @@ def handle_message(update: Update, context: CallbackContext):
         if data:
             if data.get("code") == 0:
                 video_data = data.get("data", {})
-                summary = f"*ID*: {video_data.get('aweme_id')}\n"
-                summary += f"*Title*: {video_data.get('title')}\n"
-                summary += f"*HD Play URL*: {video_data.get('hdplay')}\n"
-                summary += format_usage_info(usage_info)
-                update.message.reply_text("Data berhasil diambil:\n" + summary, parse_mode='Markdown')
+                title = video_data.get("title", "Tanpa Judul")
+                hdplay_url = video_data.get("hdplay")
+                music_url = video_data.get("music")
+                author = video_data.get("author", {})
+                username = author.get("nickname", "Unknown")
+                
+                # Download file video dan audio
+                video_bytes = download_file(hdplay_url) if hdplay_url else None
+                audio_bytes = download_file(music_url) if music_url else None
+                
+                # Buat caption dengan judul dan nama user
+                caption = f"*{title}*\nUser: {username}"
+                
+                if video_bytes:
+                    video_file = InputFile(BytesIO(video_bytes), filename="video.mp4")
+                    update.message.reply_video(video=video_file, caption=caption, parse_mode='Markdown')
+                else:
+                    update.message.reply_text("Gagal mendownload video dari URL.")
+                
+                if audio_bytes:
+                    audio_file = InputFile(BytesIO(audio_bytes), filename="audio.mp3")
+                    update.message.reply_audio(audio=audio_file)
+                else:
+                    update.message.reply_text("Gagal mendownload sound dari video.")
+                
+                # Opsional: tampilkan info penggunaan API
+                usage_text = format_usage_info(usage_info)
+                if usage_text:
+                    update.message.reply_text("Info API:" + usage_text, parse_mode='Markdown')
             else:
                 update.message.reply_text("API mengembalikan error:\n" + str(data))
         else:
@@ -81,10 +120,6 @@ def handle_message(update: Update, context: CallbackContext):
         update.message.reply_text("Silakan kirim link video TikTok untuk mengambil data.")
 
 def check_limit(update: Update, context: CallbackContext):
-    """
-    Handler untuk perintah /limit. Fungsi ini memanggil API dengan URL dummy
-    untuk mendapatkan informasi penggunaan API dan mengembalikannya ke pengguna.
-    """
     dummy_url = "https://vt.tiktok.com/ZSM5ULmYT/"
     _, usage_info = get_video_info_rapidapi(dummy_url)
     if usage_info:
@@ -97,11 +132,8 @@ def main():
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
-    # Handler untuk perintah /start
     dp.add_handler(CommandHandler("start", start))
-    # Handler untuk perintah /limit untuk mengecek sisa penggunaan API
     dp.add_handler(CommandHandler("limit", check_limit))
-    # Handler untuk pesan teks yang mengandung link TikTok
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
     print("Bot berjalan...")
